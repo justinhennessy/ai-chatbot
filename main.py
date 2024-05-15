@@ -4,12 +4,6 @@ load_dotenv()
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents import create_openai_functions_agent, AgentExecutor
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores.faiss import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter, CharacterTextSplitter
-from langchain_community.document_loaders import WebBaseLoader
-from langchain.tools.retriever import create_retriever_tool
 from langchain_community.chat_message_histories.upstash_redis import (
     UpstashRedisChatMessageHistory,
 )
@@ -27,88 +21,9 @@ from deepgram import (
     LiveOptions,
 )
 import os
-import getpass
-from langchain_chroma import Chroma
-from langchain_community.document_loaders import TextLoader
-import json
-import hashlib
-from langchain.pydantic_v1 import BaseModel, Field
-from langchain.tools import BaseTool, StructuredTool, tool
-
-
-# Create Quote retriever
-def calculate_checksum(filepath):
-    sha256 = hashlib.sha256()
-    try:
-        with open(filepath, 'rb') as f:
-            while chunk := f.read(8192):
-                sha256.update(chunk)
-        return sha256.hexdigest()
-    except FileNotFoundError:
-        return None
-
-def save_checksum(filepath, data):
-    with open(filepath, 'w') as f:
-        json.dump(data, f)
-
-def load_checksum(filepath):
-    if os.path.exists(filepath):
-        with open(filepath, 'r') as f:
-            return json.load(f)
-    return {}
-
-def load_file(file, refresh=True):
-    current_checksum = calculate_checksum(file)
-
-    if current_checksum is None:
-        print(f"File '{file}' not found.")
-        return None
-
-    retriever = None
-    checksums = load_checksum('file_modification_times.json')
-
-    if file in checksums:
-        last_checksum = checksums[file]
-        if current_checksum != last_checksum:
-            retriever = create_retriever(file)
-            checksums[file] = current_checksum
-        else:
-            retriever = create_retriever(file, False)
-    else:
-        retriever = create_retriever(file)
-        checksums[file] = current_checksum
-
-    save_checksum('file_modification_times.json', checksums)
-    return retriever
-
-def create_retriever(file, refresh=True, k=1):
-    quote_loader = TextLoader(file)
-    docs = quote_loader.load()
-
-    splitter = CharacterTextSplitter(
-        chunk_size=200,
-        chunk_overlap=0
-    )
-
-    splitDocs = splitter.split_documents(docs)
-
-    embedding = OpenAIEmbeddings()
-
-    if refresh:
-        print("Refreshing vector database ...")
-        vectorStore = FAISS.from_documents(splitDocs, embedding=embedding)
-        vectorStore.save_local("faiss_index")
-    else:
-        print("Loading cached vector database ...")
-        vectorStore = FAISS.load_local("faiss_index", embedding, allow_dangerous_deserialization=True)
-
-    retriever = vectorStore.as_retriever(search_kwargs={"k": k})
-
-    return retriever
+from tools import search, retriever_tools, refresh_quote_vectorstore, add_new_quote, get_mercury_retrograde_status
 
 # Example usage
-retriever = load_file('quotes.txt')
-
 history = UpstashRedisChatMessageHistory(
     url=os.getenv("UPSTASH_URL"),
     token=os.getenv("UPSTASH_TOKEN"),
@@ -128,27 +43,13 @@ prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder(variable_name="agent_scratchpad")
 ])
 
+tools = [search, refresh_quote_vectorstore, retriever_tools, add_new_quote]
+
 memory = ConversationBufferMemory(
     memory_key="chat_history",
     return_messages=True,
     chat_memory=history
 )
-
-search = TavilySearchResults()
-
-retriever_tools = create_retriever_tool(
-    retriever,
-    "myquotes_search",
-    "Use this tool when searching for quotes that I have made note of."
-)
-
-@tool
-def refresh_quote_vectorstore(file='quotes.txt') -> bool:
-    """Refreshes the quote vecrtor database after the file has been changed"""
-    create_retriever('quotes.txt')
-    return True
-
-tools = [search, retriever_tools, refresh_quote_vectorstore]
 
 agent = create_openai_functions_agent(
     llm=model,
@@ -194,10 +95,7 @@ def text_to_speech(text):
 
     # Check if the request was successful
     if response.status_code == 200:
-        # Save the response content to a file
-        # with open(audio_file_path, "wb") as f:
-        #     f.write(response.content)
-
+        # Save the response content to a file in chucks
         with open(audio_file_path, 'wb') as file_stream:
             response = requests.post(url, headers=headers, json=payload, stream=True)
             for chunk in response.iter_content(chunk_size=1024):
