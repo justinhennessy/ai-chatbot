@@ -4,3 +4,4 @@ quotes.txt
 output.mp3
 file_modification_times.json
 .DS_Store
+__pycache__
